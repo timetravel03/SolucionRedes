@@ -45,71 +45,94 @@ namespace Ejercicio5Servidor
 
             CargarPalabras();
             CargarRecords();
-            while (listaRecords.Count < 3)
-            {
-                listaRecords.Add(new Record("---", 9999));
-            }
         }
 
         public void LoopServidor()
         {
-            using (socketServidor = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+            try
             {
-                BuscarPuertos();
-                socketServidor.Listen(10);
-                Console.WriteLine($"Servidor escuchando en {ipEndPoint.Address}:{ipEndPoint.Port}");
-                while (true)
+                using (socketServidor = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
                 {
-                    socketCliente = socketServidor.Accept();
-                    Thread thread = new Thread(FuncionCliente);
-                    thread.IsBackground = true;
-                    thread.Start(socketCliente);
+                    BuscarPuertos();
+                    socketServidor.Listen(10);
+                    Console.WriteLine($"Servidor escuchando en {ipEndPoint.Address}:{ipEndPoint.Port}");
+                    while (true)
+                    {
+                        socketCliente = socketServidor.Accept();
+                        Thread thread = new Thread(FuncionCliente);
+                        thread.IsBackground = true;
+                        thread.Start(socketCliente);
+                    }
                 }
             }
+            catch (SocketException ex)
+            {
+                Console.WriteLine($"El servidor se apagará ahora {ex.Message}");
+            }
+
         }
 
         private void FuncionCliente(object socket)
         {
-            Socket esteSocket = (Socket)socket;
+            using (Socket esteSocket = (Socket)socket)
             using (NetworkStream ns = new NetworkStream(esteSocket))
             using (StreamReader sr = new StreamReader(ns))
             using (StreamWriter sw = new StreamWriter(ns))
             {
                 // leer input
-                string input = sr.ReadLine();
-
-                switch (input)
+                sw.AutoFlush = true;
+                string input;
+                if ((input = sr.ReadLine()) != null)
                 {
-                    case "getword":
-                        string palabra = listaPalabras[rnd.Next(listaPalabras.Count - 1)];
-                        sw.WriteLine(palabra);
-                        break;
-                    case string c when c.StartsWith("sendword "):
-                        sw.WriteLine(GuardarPalabra(c.Split(' ')[1]) ? "OK" : "ERROR");
-                        CargarPalabras();
-                        break;
-                    case "getrecords":
-                        string records = "";
-                        foreach (Record item in listaRecords)
-                        {
-                            records += $"{item.Nombre}:{item.Segundos},";
-                        }
-                        sw.WriteLine(records);
-                        break;
-                    case string c when c.StartsWith("sendrecord "):
-                        // formato de records -> nombre:segundos,
-                        string datosRecord = c.Split(' ')[1];
-                        //datosRecord = datosRecord.Remove(',');
-                        string[] datos = datosRecord.Split(':');
-                        Record record = new Record(datos[0], int.Parse(datos[1]));
-                        sw.WriteLine(GuardarRecord(record) ? "ACCEPT" : "REJECT");
-                        CargarRecords();
-                        break;
-                    default:
-                        break;
+                    switch (input)
+                    {
+                        case "getword":
+                            string palabra = "";
+                            lock (testigoPalabras)
+                            {
+                                palabra = listaPalabras[rnd.Next(listaPalabras.Count - 1)];
+                            }
+                            sw.WriteLine(palabra);
+                            break;
+                        case string c when c.StartsWith("sendword "):
+                            sw.WriteLine(GuardarPalabra(c.Split(' ')[1]) ? "OK" : "ERROR");
+                            CargarPalabras();
+                            break;
+                        case "getrecords":
+                            string records = "";
+                            lock (testigoRecords)
+                            {
+                                foreach (Record item in listaRecords)
+                                {
+                                    records += $"{item.Nombre}:{item.Segundos},";
+                                }
+                            }
+                            sw.WriteLine(records);
+                            break;
+                        case string c when c.StartsWith("sendrecord "):
+                            string datosRecord = c.Split(' ')[1];
+                            string[] datos = datosRecord.Split(':');
+                            Record record = new Record(datos[0], int.Parse(datos[1]));
+                            bool valido = RecordValido(record);
+                            sw.WriteLine(valido ? "ACCEPT" : "REJECT");
+                            if (valido)
+                            {
+                                GuardarRecords(record);
+                                CargarRecords();
+                            }
+                            break;
+                        case string c when c.Contains("closeserver "):
+                            string[] values = c.Split(' ');
+                            if (values.Length == 2 && values[1] == "password")
+                            {
+                                socketServidor.Close();
+                            }
+                            break;
+                        default:
+                            break;
+                    }
                 }
             }
-            esteSocket.Close();
         }
 
         // funciones de coleccion de palabras
@@ -117,12 +140,22 @@ namespace Ejercicio5Servidor
         {
             try
             {
-                using (StreamWriter sr = new StreamWriter(rutaArchivoPalabras, true))
+                if (palabra != "")
                 {
-                    sr.Write($"{palabra},");
-                    listaPalabras.Add(palabra);
+                    lock (testigoPalabras)
+                    {
+                        using (StreamWriter sr = new StreamWriter(rutaArchivoPalabras, true))
+                        {
+                            sr.Write($"{palabra},");
+                            listaPalabras.Add(palabra);
+                        }
+                    }
+                    return true;
                 }
-                return true;
+                else
+                {
+                    return false;
+                }
             }
             catch (IOException)
             {
@@ -135,11 +168,19 @@ namespace Ejercicio5Servidor
         {
             try
             {
-                using (StreamReader sr = new StreamReader(rutaArchivoPalabras))
+                lock (testigoPalabras)
                 {
-                    listaPalabras.AddRange(sr.ReadToEnd().Split(','));
-                    Array.ForEach(listaPalabras.ToArray(), palabra => palabra.ToUpper());
-                    Console.WriteLine("Lectura de palabras finalizada");
+                    using (StreamReader sr = new StreamReader(rutaArchivoPalabras))
+                    {
+                        string[] palabrasLeidas = sr.ReadToEnd().Split(',');
+                        for (int i = 0; i < palabrasLeidas.Length; i++)
+                        {
+                            palabrasLeidas[i] = palabrasLeidas[i].ToUpper();
+                        }
+                        listaPalabras.AddRange(palabrasLeidas);
+                        listaPalabras.RemoveAt(listaPalabras.Count - 1);
+                        Console.WriteLine("Lectura de palabras finalizada");
+                    }
                 }
             }
             catch (IOException)
@@ -149,59 +190,59 @@ namespace Ejercicio5Servidor
         }
 
         // funcion de coleccion de records
-        private bool GuardarRecord(Record record)
+        private void GuardarRecords(Record record)
         {
-            bool valido = false;
-            int index = 0;
-            Record temp;
             try
             {
-                while (!valido && index < listaRecords.Count)
+                lock (testigoRecords)
                 {
-                    valido = listaRecords[index].Segundos > record.Segundos;
-                    index++;
-                }
-
-                if (valido)
-                {
-                    temp = listaRecords[index];
-                    listaRecords[index] = record;
-                    while (index < (listaRecords.Count - 1))
+                    using (RecordWriter rw = new RecordWriter(new FileStream(rutaArchivoRecords, FileMode.Create)))
                     {
-                        index++;
-                        listaRecords[index] = temp;
+                        foreach (Record item in listaRecords)
+                        {
+                            rw.WriteRecord(item);
+                        }
                     }
-
-                    return true;
-                }
-                else
-                {
-                    return false;
                 }
             }
             catch (IOException)
             {
                 Console.WriteLine("Error de escritura del archivo de records");
-                return false;
+            }
+        }
+
+        private bool RecordValido(Record record)
+        {
+            lock (testigoRecords)
+            {
+                listaRecords.Add(record);
+                OrdernarRecords();
+                if (listaRecords.Count > 3)
+                {
+                    listaRecords.RemoveAt(listaRecords.Count - 1);
+                }
+
+                return listaRecords.Contains(record);
             }
         }
 
         private void OrdernarRecords()
         {
             Record temp;
-            if (listaRecords[0].Segundos < listaRecords[1].Segundos)
+            lock (testigoRecords)
             {
-                temp = listaRecords[0];
-                listaRecords[0] = listaRecords[1];
-                listaRecords[1] = temp;
-
-            }
-            if (listaRecords[1].Segundos < listaRecords[2].Segundos)
-            {
-                temp = listaRecords[1];
-                listaRecords[1] = listaRecords[2];
-                listaRecords[2] = temp;
-                OrdernarRecords();
+                for (int i = 0; i < listaRecords.Count; i++)
+                {
+                    for (int j = 0; j < listaRecords.Count - 1; j++)
+                    {
+                        if (listaRecords[j].Segundos > listaRecords[j + 1].Segundos)
+                        {
+                            temp = listaRecords[j + 1];
+                            listaRecords[j + 1] = listaRecords[j];
+                            listaRecords[j] = temp;
+                        }
+                    }
+                }
             }
         }
 
@@ -209,21 +250,24 @@ namespace Ejercicio5Servidor
         {
             try
             {
-                using (RecordReader rr = new RecordReader(new FileStream(rutaArchivoRecords, FileMode.Open)))
+                lock (testigoRecords)
                 {
-                    try
+                    listaRecords.Clear();
+                    using (RecordReader rr = new RecordReader(new FileStream(rutaArchivoRecords, FileMode.Open)))
                     {
-                        while (true)
+                        try
                         {
-                            listaRecords.Add(rr.ReadRecord());
+                            while (true)
+                            {
+                                listaRecords.Add(rr.ReadRecord());
+                            }
+                        }
+                        catch (EndOfStreamException)
+                        {
+                            Console.WriteLine("Lectura de Records finalizada");
+                            OrdernarRecords();
                         }
                     }
-                    catch (EndOfStreamException)
-                    {
-                        Console.WriteLine("Lectura de Records finalizada");
-                        OrdernarRecords();
-                    }
-
                 }
             }
             catch (IOException)
